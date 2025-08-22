@@ -3,115 +3,358 @@ import AVFoundation
 
 struct ContentView: View {
   @StateObject private var ocr = LiveOCR()
-  @State private var green = false
+
+  // OCR text we most recently sent (shown in failure modal)
   @State private var lastText: String = ""
-  @State private var reason: String? = "Align receipt in frame"
+
+  // API call & result modal
+  @State private var isCallingAPI = false
+  @State private var showResult = false
+  @State private var resultSuccess = false
+  @State private var resultDetail = ""
+
+  // Credentials persisted in UserDefaults
+  @AppStorage("bearerToken") private var storedBearerToken: String = ""
+  @AppStorage("applicationId") private var storedApplicationId: String = ""
+  @State private var showLogin: Bool = false
+  @State private var inputToken: String = ""
+  @State private var inputApplicationId: String = ""
+  @State private var loginError: String? = nil
+
+  // Persisted Zoom
+  @AppStorage("zoomFactor") private var storedZoom: Double = 1.25 // default ~25% in
+
+  // Fixed API URL
+  private let apiURL = URL(string: "https://sticky.to/v2/connectionhook/---/CONNECTION_EXTERNAL_PAYMENT/private--payment")!
+
+  private var isLoggedIn: Bool {
+    !storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
+    !storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+  }
 
   var body: some View {
-    ZStack {
-      // Live camera preview
+    // Base content
+    let base = ZStack {
+      Color.black.ignoresSafeArea()
+
+      // Live camera; tap anywhere to Scan Now
       CameraView(session: ocr.session)
         .ignoresSafeArea()
+        .contentShape(Rectangle())
+        .onTapGesture { ocr.scanNow() }
 
-      // Overlay HUD
+      // Bottom controls: Zoom slider + Log out (only when logged in & not on login modal)
       VStack {
-        // Status pill (GREEN/RED + short reason)
-        HStack(spacing: 8) {
-          Circle()
-            .fill(green ? .green : .red)
-            .frame(width: 16, height: 16)
-          Text(green ? "READY" : "HOLD")
-            .font(.headline)
-            .foregroundColor(.white)
-          if let reason, !green {
-            Text("· \(reason)")
-              .font(.subheadline)
-              .foregroundColor(.white.opacity(0.9))
-              .lineLimit(1)
-              .truncationMode(.tail)
-          }
-          Spacer()
-        }
-        .padding(.horizontal)
-        .padding(.top, 12)
-
         Spacer()
-
-        // Extracted text + actions
-        VStack(alignment: .leading, spacing: 10) {
-          Text("Extracted")
-            .font(.caption)
-            .foregroundColor(.white.opacity(0.85))
-
-          ScrollView {
-            Text(lastText.isEmpty ? "—" : lastText)
+        if isLoggedIn && !showLogin {
+          VStack(alignment: .leading, spacing: 8) {
+            Text("Zoom: \(String(format: "%.2fx", ocr.zoomFactor))")
               .font(.footnote)
               .foregroundColor(.white)
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-              .padding(.top, 2)
+              .padding(.horizontal)
+
+            Slider(
+              value: Binding(
+                get: { Double(ocr.zoomFactor) },
+                set: { newVal in
+                  let val = CGFloat(newVal)
+                  ocr.zoomFactor = val
+                  storedZoom = Double(val)
+                }
+              ),
+              in: 1.0...5.0,
+              step: 0.05
+            )
+            .padding(.horizontal)
+
+            HStack {
+              Button("Log out") {
+                storedBearerToken = ""
+                storedApplicationId = ""
+                inputToken = ""
+                inputApplicationId = ""
+                loginError = nil
+                showLogin = true
+                lastText = ""
+                ocr.reset()
+              }
+              .buttonStyle(.bordered)
+              .tint(.white)
+
+              Spacer()
+            }
+            .padding(.horizontal)
           }
-          .frame(maxHeight: 180)
-
-          HStack {
-            Button("Reset") {
-              ocr.reset()
-              lastText = ""
-              green = false
-              reason = "Align receipt in frame"
-            }
-            .buttonStyle(.bordered)
-            .tint(.white)
-
-            Button("Scan Now") {
-              // Force a one-shot OCR of the next frame (no debouncing)
-              ocr.scanNow()
-              reason = "Scanning…"
-            }
-            .buttonStyle(.bordered)
-            .tint(.white)
-
-            Spacer()
-
-            Button("Simulate API call") {
-              // Wire your API call here using `lastText`
-            }
-            .buttonStyle(.borderedProminent)
-          }
+          .padding(.bottom, 16)
+        } else {
+          Color.clear.frame(height: 16)
         }
-        .padding(14)
-        .background(.black.opacity(0.55))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
-        .padding(.horizontal)
-        .padding(.bottom, 16)
       }
     }
-    // Receive stable OCR text (auto or forced)
-    .onReceive(ocr.$stableText) { text in
-      guard let text = text else { return }
-      lastText = text
+    // 🔁 TAP-ONLY OCR: listen to one-shot results
+    .onReceive(ocr.$lastText) { text in
+      guard let text, !text.isEmpty else { return }
+      guard isLoggedIn, !showLogin, !showResult, !isCallingAPI else { return }
 
-      // GREEN stub logic: go green if extracted text contains "COFFEE"
-      let hasCoffee = text.localizedCaseInsensitiveContains("coffee")
-      green = hasCoffee
-      reason = hasCoffee ? nil : "No ‘COFFEE’ detected yet"
+      lastText = text.uppercased() // source of truth for API + error display
+      isCallingAPI = true
+      Task { await sendToAPI(cartText: lastText) }
     }
-    // Receive state updates from the OCR engine (auto mode feedback)
-    .onReceive(ocr.$state) { state in
-      switch state {
-      case .findingROI:
-        green = false; reason = "Align receipt in frame"
-      case .unstable:
-        green = false; reason = "Hold steady…"
-      case .processing:
-        green = false; reason = "Processing…"
-      case .ready:
-        break
-      }
+    // Optional: surface zoom failures if LiveOCR publishes them
+    .onReceive(ocr.$zoomError) { msg in
+      guard let msg, !msg.isEmpty else { return }
+      isCallingAPI = false
+      resultSuccess = false
+      resultDetail = "Camera zoom failed: \(msg)"
+      showResult = true
+      ocr.zoomError = nil
     }
-    // Start capture/OCR
     .task {
+      // Show login if missing creds
+      showLogin = !isLoggedIn
+      // Apply persisted zoom to OCR engine on launch
+      let z = max(1.0, storedZoom)
+      if ocr.zoomFactor != CGFloat(z) {
+        ocr.zoomFactor = CGFloat(z)
+      }
       await ocr.start()
     }
+
+    // Compose overlays in correct stacking order
+    base
+      // Loading modal (white spinner card)
+      .overlay(loadingOverlay.zIndex(4))
+      // Result modal (success/fail) – ALWAYS topmost
+      .overlay(resultOverlay.zIndex(5))
+      // Login modal on very top as well (functionally top when shown)
+      .overlay(loginOverlay.zIndex(6))
+  }
+
+  // MARK: - Loading Overlay
+  @ViewBuilder
+  private var loadingOverlay: some View {
+    if isCallingAPI && !showResult {
+      ZStack {
+        Color.black.opacity(0.6).ignoresSafeArea()
+        VStack {
+          ProgressView()
+            .progressViewStyle(CircularProgressViewStyle(tint: .black))
+            .scaleEffect(2.0)
+        }
+        .padding(40)
+        .frame(maxWidth: 160, maxHeight: 160)
+        .background(Color.white)
+        .cornerRadius(18)
+        .shadow(radius: 16)
+      }
+      // Ensure it intercepts taps while visible
+      .allowsHitTesting(true)
+    }
+  }
+
+  // MARK: - Result Overlay
+  @ViewBuilder
+  private var resultOverlay: some View {
+    if showResult {
+      ZStack {
+        Color.black.opacity(0.6).ignoresSafeArea()
+
+        VStack(spacing: 20) {
+          Image(systemName: resultSuccess ? "checkmark.circle.fill" : "xmark.octagon.fill")
+            .font(.system(size: 72, weight: .bold))
+            .foregroundColor(resultSuccess ? .green : .red)
+
+          if resultSuccess {
+            Text("Success!")
+              .font(.system(size: 26, weight: .bold))
+              .foregroundColor(.black)
+              .multilineTextAlignment(.center)
+
+            if !resultDetail.isEmpty {
+              Text(resultDetail)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundColor(.black.opacity(0.85))
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            }
+          } else {
+            if !resultDetail.isEmpty {
+              Text(resultDetail)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(.black)
+                .multilineTextAlignment(.center)
+                .padding(.horizontal)
+            }
+            if !lastText.isEmpty {
+              VStack(alignment: .leading, spacing: 8) {
+                Text("Scanned text")
+                  .font(.system(size: 16, weight: .bold))
+                  .foregroundColor(.black.opacity(0.8))
+                ScrollView {
+                  Text(lastText)
+                    .font(.system(size: 16, weight: .regular, design: .monospaced))
+                    .foregroundColor(.black)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxHeight: 160)
+                .padding(12)
+                .background(Color.black.opacity(0.06))
+                .cornerRadius(10)
+              }
+              .padding(.horizontal)
+            }
+          }
+
+          Button(action: {
+            showResult = false
+            lastText = ""
+            ocr.reset()
+          }) {
+            Text("Dismiss")
+              .font(.system(size: 20, weight: .bold))
+              .foregroundColor(.white)
+              .frame(maxWidth: .infinity)
+              .padding()
+              .background(Color.black)
+              .cornerRadius(12)
+          }
+          .padding(.top, 6)
+        }
+        .padding(30)
+        .frame(maxWidth: 360)
+        .background(Color.white)
+        .cornerRadius(18)
+        .shadow(radius: 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 24)
+      }
+      // Make sure it intercepts all taps
+      .allowsHitTesting(true)
+    }
+  }
+
+  // MARK: - Login Overlay
+  @ViewBuilder
+  private var loginOverlay: some View {
+    if showLogin {
+      ZStack {
+        Color.black.opacity(0.6).ignoresSafeArea()
+        VStack(alignment: .leading, spacing: 16) {
+          Text("Private key")
+            .font(.system(size: 22, weight: .bold))
+            .foregroundColor(.black)
+
+          TextField("Enter private key", text: $inputToken)
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+            .font(.system(size: 18))
+            .padding(12)
+            .background(Color.black.opacity(0.06))
+            .cornerRadius(10)
+
+          Text("Flow ID")
+            .font(.system(size: 22, weight: .bold))
+            .foregroundColor(.black)
+
+          TextField("Enter Flow ID", text: $inputApplicationId)
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+            .font(.system(size: 18))
+            .padding(12)
+            .background(Color.black.opacity(0.06))
+            .cornerRadius(10)
+
+          if let loginError {
+            Text(loginError)
+              .font(.system(size: 16, weight: .semibold))
+              .foregroundColor(.red)
+          }
+
+          Button(action: {
+            let token = inputToken.trimmingCharacters(in: .whitespacesAndNewlines)
+            let appId = inputApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+            if token.isEmpty || appId.isEmpty {
+              loginError = "Please enter both Private key and Flow ID."
+            } else {
+              storedBearerToken = token
+              storedApplicationId = appId
+              inputToken = ""
+              inputApplicationId = ""
+              loginError = nil
+              showLogin = false
+            }
+          }) {
+            Text("Log in")
+              .font(.system(size: 20, weight: .bold))
+              .foregroundColor(.white)
+              .frame(maxWidth: .infinity)
+              .padding()
+              .background(Color.black)
+              .cornerRadius(12)
+          }
+          .padding(.top, 8)
+        }
+        .padding(24)
+        .frame(maxWidth: 360)
+        .background(Color.white)
+        .cornerRadius(18)
+        .shadow(radius: 16)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(.horizontal, 24)
+      }
+      .allowsHitTesting(true)
+    }
+  }
+
+  // MARK: - API
+
+  private func sendToAPI(cartText: String) async {
+    let token = storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    let appId = storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !token.isEmpty, !appId.isEmpty else {
+      await MainActor.run { showLogin = true; isCallingAPI = false }
+      return
+    }
+
+    var req = URLRequest(url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+    req.httpMethod = "POST"
+    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+
+    // Body: { "cart": "<OCR TEXT>", "applicationId": "<Flow ID>" }
+    let payload: [String: String] = ["cart": cartText, "applicationId": appId]
+    req.httpBody = try? JSONSerialization.data(withJSONObject: payload, options: [])
+
+    do {
+      let (data, resp) = try await URLSession.shared.data(for: req)
+      let code = (resp as? HTTPURLResponse)?.statusCode ?? -1
+
+      if code == 200 {
+        var plain: String? = nil
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+          plain = obj["asPlainText"] as? String
+        }
+        await MainActor.run {
+          presentResult(success: true, detail: plain ?? "Success!")
+        }
+      } else {
+        let body = String(data: data, encoding: .utf8) ?? ""
+        await MainActor.run {
+          presentResult(success: false, detail: String(body.prefix(400)))
+        }
+      }
+    } catch {
+      await MainActor.run {
+        presentResult(success: false, detail: error.localizedDescription)
+      }
+    }
+  }
+
+  @MainActor
+  private func presentResult(success: Bool, detail: String) {
+    resultSuccess = success
+    resultDetail = detail
+    showResult = true
+    isCallingAPI = false
   }
 }
