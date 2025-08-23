@@ -1,5 +1,5 @@
-import SwiftUI
 import AVFoundation
+import SwiftUI
 
 struct CameraView: UIViewRepresentable {
   let session: AVCaptureSession

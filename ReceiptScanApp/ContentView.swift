@@ -1,5 +1,5 @@
-import SwiftUI
 import AVFoundation
+import SwiftUI
 
 struct ContentView: View {
   @StateObject private var ocr = LiveOCR()
@@ -22,14 +22,15 @@ struct ContentView: View {
   @State private var loginError: String? = nil
 
   // Persisted Zoom
-  @AppStorage("zoomFactor") private var storedZoom: Double = 1.25 // default ~25% in
+  @AppStorage("zoomFactor") private var storedZoom: Double = 1.25  // default ~25% in
 
   // Fixed API URL
-  private let apiURL = URL(string: "https://sticky.to/v2/connectionhook/---/CONNECTION_EXTERNAL_PAYMENT/private--payment")!
+  private let apiURL = URL(
+    string: "https://sticky.to/v2/connectionhook/---/CONNECTION_EXTERNAL_PAYMENT/private--payment")!
 
   private var isLoggedIn: Bool {
-    !storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty &&
-    !storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    !storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      && !storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
   }
 
   var body: some View {
@@ -96,7 +97,7 @@ struct ContentView: View {
       guard let text, !text.isEmpty else { return }
       guard isLoggedIn, !showLogin, !showResult, !isCallingAPI else { return }
 
-      lastText = text.uppercased() // source of truth for API + error display
+      lastText = text.uppercased()  // source of truth for API + error display
       isCallingAPI = true
       Task { await sendToAPI(cartText: lastText) }
     }
@@ -312,11 +313,15 @@ struct ContentView: View {
     let token = storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
     let appId = storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !token.isEmpty, !appId.isEmpty else {
-      await MainActor.run { showLogin = true; isCallingAPI = false }
+      await MainActor.run {
+        showLogin = true
+        isCallingAPI = false
+      }
       return
     }
 
-    var req = URLRequest(url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
+    var req = URLRequest(
+      url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
     req.httpMethod = "POST"
     req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")

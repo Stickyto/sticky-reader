@@ -1,7 +1,7 @@
-import Foundation
 import AVFoundation
-import Vision
 import CoreGraphics
+import Foundation
+import Vision
 
 @MainActor
 class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferDelegate {
@@ -16,7 +16,7 @@ class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferD
 
   // Zoom controls expected by ContentView
   @Published var zoomError: String? = nil
-  @Published var zoomFactor: CGFloat = 1.25 {               // default ~25% in
+  @Published var zoomFactor: CGFloat = 1.25 {  // default ~25% in
     didSet { applyZoom(zoomFactor) }
   }
 
@@ -34,7 +34,8 @@ class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferD
     session.sessionPreset = .photo
 
     // Back wide camera
-    let chosenDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+    let chosenDevice = AVCaptureDevice.default(
+      .builtInWideAngleCamera, for: .video, position: .back)
     self.device = chosenDevice
 
     guard
@@ -102,7 +103,8 @@ class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferD
 
       // Report if we had to clamp, otherwise clear any previous error
       if abs(clamped - factor) > 0.001 {
-        self.zoomError = String(format: "Requested %.2fx clamped to %.2fx (max %.2fx).", factor, clamped, maxZ)
+        self.zoomError = String(
+          format: "Requested %.2fx clamped to %.2fx (max %.2fx).", factor, clamped, maxZ)
       } else {
         self.zoomError = nil
       }
@@ -113,9 +115,11 @@ class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferD
 
   // MARK: - Delegate (tap-only OCR)
 
-  func captureOutput(_ output: AVCaptureOutput,
-                     didOutput sampleBuffer: CMSampleBuffer,
-                     from connection: AVCaptureConnection) {
+  func captureOutput(
+    _ output: AVCaptureOutput,
+    didOutput sampleBuffer: CMSampleBuffer,
+    from connection: AVCaptureConnection
+  ) {
     guard requestScan else { return }
     requestScan = false
 
@@ -131,7 +135,7 @@ class LiveOCR: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleBufferD
         }
       } else if let err {
         DispatchQueue.main.async {
-          self.lastText = "" // emit empty to avoid stale text
+          self.lastText = ""  // emit empty to avoid stale text
           self.zoomError = "OCR error: \(err.localizedDescription)"
         }
       }
