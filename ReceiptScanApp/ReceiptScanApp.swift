@@ -1,7 +1,7 @@
 import SwiftUI
 
 @main
-struct ReceiptScanApp: App {
+struct StickyReader: App {
   var body: some Scene {
     WindowGroup {
       ContentView()
