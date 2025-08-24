@@ -14,11 +14,14 @@ struct ContentView: View {
   @State private var resultDetail = ""
 
   // Credentials persisted in UserDefaults
-  @AppStorage("bearerToken") private var storedBearerToken: String = ""
-  @AppStorage("applicationId") private var storedApplicationId: String = ""
+  @AppStorage("bearerToken") private var storedBearerToken: String = ""  // Private key (Bearer)
+  @AppStorage("applicationId") private var storedApplicationId: String = ""  // Flow ID
+  @AppStorage("federatedUserPrivateKey") private var storedFederatedUserPrivateKey: String = ""  // Team member private key (optional)
+
   @State private var showLogin: Bool = false
   @State private var inputToken: String = ""
   @State private var inputApplicationId: String = ""
+  @State private var inputFederatedUserPrivateKey: String = ""  // optional input
   @State private var loginError: String? = nil
 
   // Persisted Zoom
@@ -28,6 +31,7 @@ struct ContentView: View {
   private let apiURL = URL(
     string: "https://sticky.to/v2/connectionhook/---/CONNECTION_EXTERNAL_PAYMENT/private--payment")!
 
+  // Logged in = only private key + flow id required
   private var isLoggedIn: Bool {
     !storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       && !storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -72,8 +76,10 @@ struct ContentView: View {
               Button("Log out") {
                 storedBearerToken = ""
                 storedApplicationId = ""
+                storedFederatedUserPrivateKey = ""
                 inputToken = ""
                 inputApplicationId = ""
+                inputFederatedUserPrivateKey = ""
                 loginError = nil
                 showLogin = true
                 lastText = ""
@@ -92,7 +98,7 @@ struct ContentView: View {
         }
       }
     }
-    // 🔁 TAP-ONLY OCR: listen to one-shot results
+    // TAP-ONLY OCR: listen to one-shot results
     .onReceive(ocr.$lastText) { text in
       guard let text, !text.isEmpty else { return }
       guard isLoggedIn, !showLogin, !showResult, !isCallingAPI else { return }
@@ -111,7 +117,7 @@ struct ContentView: View {
       ocr.zoomError = nil
     }
     .task {
-      // Show login if missing creds
+      // Show login if missing required creds
       showLogin = !isLoggedIn
       // Apply persisted zoom to OCR engine on launch
       let z = max(1.0, storedZoom)
@@ -123,12 +129,9 @@ struct ContentView: View {
 
     // Compose overlays in correct stacking order
     base
-      // Loading modal (white spinner card)
-      .overlay(loadingOverlay.zIndex(4))
-      // Result modal (success/fail) – ALWAYS topmost
-      .overlay(resultOverlay.zIndex(5))
-      // Login modal on very top as well (functionally top when shown)
-      .overlay(loginOverlay.zIndex(6))
+      .overlay(loadingOverlay.zIndex(4))  // Loading modal (white spinner card)
+      .overlay(resultOverlay.zIndex(5))  // Result modal (success/fail)
+      .overlay(loginOverlay.zIndex(6))  // Login modal – topmost when shown
   }
 
   // MARK: - Loading Overlay
@@ -148,7 +151,6 @@ struct ContentView: View {
         .cornerRadius(18)
         .shadow(radius: 16)
       }
-      // Ensure it intercepts taps while visible
       .allowsHitTesting(true)
     }
   }
@@ -229,7 +231,6 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .padding(.horizontal, 24)
       }
-      // Make sure it intercepts all taps
       .allowsHitTesting(true)
     }
   }
@@ -265,6 +266,18 @@ struct ContentView: View {
             .background(Color.black.opacity(0.06))
             .cornerRadius(10)
 
+          Text("Team member private key (optional)")
+            .font(.system(size: 22, weight: .bold))
+            .foregroundColor(.black)
+
+          TextField("Enter team member private key (optional)", text: $inputFederatedUserPrivateKey)
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+            .font(.system(size: 18))
+            .padding(12)
+            .background(Color.black.opacity(0.06))
+            .cornerRadius(10)
+
           if let loginError {
             Text(loginError)
               .font(.system(size: 16, weight: .semibold))
@@ -274,13 +287,19 @@ struct ContentView: View {
           Button(action: {
             let token = inputToken.trimmingCharacters(in: .whitespacesAndNewlines)
             let appId = inputApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fedKey = inputFederatedUserPrivateKey.trimmingCharacters(
+              in: .whitespacesAndNewlines)  // optional
+
             if token.isEmpty || appId.isEmpty {
               loginError = "Please enter both Private key and Flow ID."
             } else {
               storedBearerToken = token
               storedApplicationId = appId
+              // Save optional only if provided (empty is fine to save/overwrite)
+              storedFederatedUserPrivateKey = fedKey
               inputToken = ""
               inputApplicationId = ""
+              inputFederatedUserPrivateKey = ""
               loginError = nil
               showLogin = false
             }
@@ -310,9 +329,13 @@ struct ContentView: View {
   // MARK: - API
 
   private func sendToAPI(cartText: String) async {
-    let token = storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
-    let appId = storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !token.isEmpty, !appId.isEmpty else {
+    // Exact local names as requested:
+    let _storedBearerToken = storedBearerToken.trimmingCharacters(in: .whitespacesAndNewlines)
+    let _storedApplicationId = storedApplicationId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let _storedFederatedUserPrivateKey = storedFederatedUserPrivateKey.trimmingCharacters(
+      in: .whitespacesAndNewlines)  // may be empty
+
+    guard !_storedBearerToken.isEmpty, !_storedApplicationId.isEmpty else {
       await MainActor.run {
         showLogin = true
         isCallingAPI = false
@@ -323,11 +346,25 @@ struct ContentView: View {
     var req = URLRequest(
       url: apiURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 15)
     req.httpMethod = "POST"
-    req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+
+    // Authorization header rule:
+    // - Only bearer → "Bearer TOKEN"
+    // - Bearer + federated → "Bearer TOKEN//FEDKEY"
+    if _storedFederatedUserPrivateKey.isEmpty {
+      req.setValue("Bearer \(_storedBearerToken)", forHTTPHeaderField: "Authorization")
+    } else {
+      req.setValue(
+        "Bearer \(_storedBearerToken)//\(_storedFederatedUserPrivateKey)",
+        forHTTPHeaderField: "Authorization")
+    }
+
     req.setValue("application/json", forHTTPHeaderField: "Content-Type")
 
     // Body: { "cart": "<OCR TEXT>", "applicationId": "<Flow ID>" }
-    let payload: [String: String] = ["cart": cartText, "applicationId": appId]
+    let payload: [String: String] = [
+      "cart": cartText,
+      "applicationId": _storedApplicationId,
+    ]
     req.httpBody = try? JSONSerialization.data(withJSONObject: payload, options: [])
 
     do {
